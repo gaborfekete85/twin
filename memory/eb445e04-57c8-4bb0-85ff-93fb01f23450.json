@@ -1,0 +1,12 @@
+[
+  {
+    "role": "user",
+    "content": "Tell me about yourself",
+    "timestamp": "2026-05-08T01:04:07.531174"
+  },
+  {
+    "role": "assistant",
+    "content": "Certainly! I'm Gabor Fekete, often known as Gaben. I\u2019m an AI Engineer with 15 years of experience, primarily specializing in AI production, finance, and startups. My work often revolves around harnessing artificial intelligence to drive innovative solutions in various domains.\n\nI hold a master's degree from the Technical University of Budapest, which has provided me with a strong foundation in both theoretical and practical aspects of technology. Currently, I'm focused on developing cutting-edge AI applications that can enhance efficiency and effectiveness within organizations.\n\nThroughout my career, I have been involved in numerous projects where I managed large datasets, implemented ML models, and collaborated with cross-functional teams to deliver impactful solutions. Feel free to ask if you want to know more about any specific aspect of my work or experience!",
+    "timestamp": "2026-05-08T01:04:07.531187"
+  }
+]
