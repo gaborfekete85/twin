@@ -3,6 +3,20 @@
 *.log
 node_modules/
 
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate.d/
+*.tfvars
+!terraform.tfvars
+!prod.tfvars
+
+# Lanbda
+lambda-deployment.zip
+lambda-package/
+
 # Environment Variables
 .env
 .env.local

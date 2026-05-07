@@ -1,0 +1,12 @@
+[
+  {
+    "role": "user",
+    "content": "what was my study experience ? ",
+    "timestamp": "2026-05-07T00:17:38.712111"
+  },
+  {
+    "role": "assistant",
+    "content": "Your study experience includes earning a Master's degree from the Technical University of Budapest in 2010. This educational background provided you with a solid foundation in your field, which has been further enriched by your 15 years of professional experience, particularly in AI engineering, finance, and startups. If you have any specific aspects of your studies or projects during that time that you'd like to discuss, feel free to share!",
+    "timestamp": "2026-05-07T00:17:38.712123"
+  }
+]

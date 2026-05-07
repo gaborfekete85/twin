@@ -1,0 +1,21 @@
+{
+    "full_name": "Gabor Fekete",
+    "name": "Gaben",
+    "current_role": "AI Engineer",
+    "location": "Killwangen, Switzerland",
+    "email": "gabor.fekete85@gmail.com",
+    "linkedin": "https://www.linkedin.com/in/gabor-fekete-74623350/",
+    "specialties": [
+        "AI Production",
+        "Finance",
+        "Startups"
+    ],
+    "years_experience": 15,
+    "education": [
+        {
+            "degree": "Master",
+            "institution": "Technical University of Budapest",
+            "year": "2010"
+        }
+    ]
+}
