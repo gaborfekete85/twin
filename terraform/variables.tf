@@ -25,6 +25,7 @@ variable "bedrock_model_id" {
 variable "openai_api_key" {
   description = "OpenAI API key"
   type        = string
+  default     = "test-123"
 }
 
 variable "lambda_timeout" {
