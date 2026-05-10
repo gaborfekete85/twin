@@ -1,0 +1,1 @@
+pip @ file:///private/var/folders/1r/b8l6nzhj4zdbz5jmjdhqbprw0000gn/T/tmpozey9tv0/pip-26.1-py3-none-any.whl

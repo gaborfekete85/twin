@@ -6,3 +6,5 @@ python-multipart
 boto3
 pypdf
 mangum
+tavily-python
+numpy

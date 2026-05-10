@@ -13,6 +13,10 @@ terraform.tfstate.d/
 terraform.tfvars
 !prod.tfvars
 
+# Local
+memory/
+data/
+
 # Lanbda
 lambda-deployment.zip
 lambda-package/
