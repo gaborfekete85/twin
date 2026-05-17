@@ -119,9 +119,22 @@ resource "aws_iam_role_policy_attachment" "lambda_s3" {
   role       = aws_iam_role.lambda_role.name
 }
 
+# S3 bucket for deployment artifacts (Lambda zips > 50MB)
+resource "aws_s3_bucket" "deployments" {
+  bucket = "${local.name_prefix}-deployments-${data.aws_caller_identity.current.account_id}"
+  tags   = local.common_tags
+}
+
+resource "aws_s3_object" "api_zip" {
+  bucket = aws_s3_bucket.deployments.id
+  key    = "api-lambda-${filebase64sha256("${path.module}/../backend/lambda-deployment.zip")}.zip"
+  source = "${path.module}/../backend/lambda-deployment.zip"
+}
+
 # Lambda function
 resource "aws_lambda_function" "api" {
-  filename         = "${path.module}/../backend/lambda-deployment.zip"
+  s3_bucket        = aws_s3_object.api_zip.bucket
+  s3_key           = aws_s3_object.api_zip.key
   function_name    = "${local.name_prefix}-api"
   role             = aws_iam_role.lambda_role.arn
   handler          = "lambda_handler.handler"
@@ -138,6 +151,7 @@ resource "aws_lambda_function" "api" {
       USE_S3           = "true"
       BEDROCK_MODEL_ID = var.bedrock_model_id
       OPENAI_API_KEY   = var.openai_api_key
+      TAVILY_API_KEY   = var.tavily_api_key
     }
   }
 
@@ -185,15 +199,27 @@ resource "aws_apigatewayv2_route" "get_root" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
+resource "aws_apigatewayv2_route" "get_health" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /health"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
 resource "aws_apigatewayv2_route" "post_chat" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /chat"
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
-resource "aws_apigatewayv2_route" "get_health" {
+resource "aws_apigatewayv2_route" "post_train" {
   api_id    = aws_apigatewayv2_api.main.id
-  route_key = "GET /health"
+  route_key = "POST /train"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "get_conversation" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /conversation/{session_id}"
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 

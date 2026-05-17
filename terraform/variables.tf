@@ -28,6 +28,12 @@ variable "openai_api_key" {
   default     = "test-123"
 }
 
+variable "tavily_api_key" {
+  description = "Tavily API key for web crawling"
+  type        = string
+  default     = ""
+}
+
 variable "lambda_timeout" {
   description = "Lambda function timeout in seconds"
   type        = number

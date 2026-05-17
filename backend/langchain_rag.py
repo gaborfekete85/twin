@@ -143,7 +143,31 @@ def crawl_and_index(start_url: str, training_id: str, yield_sse_func):
         persist_directory=save_dir
     )
 
-    return len(chunks), pages_crawled
+    yield_sse_func({"status": "generating", "message": "Generating suggested questions..."})
+    try:
+        from langchain_core.messages import HumanMessage
+        import json
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
+        sample_text = " ".join([c.page_content for c in chunks[:5]])[:3000]
+        prompt = f"Based on the following content from a website, generate exactly 4 short, relevant questions a user might ask about it. Format the output strictly as a JSON array of 4 strings, with no markdown formatting or backticks.\n\nContent:\n{sample_text}"
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        
+        content = resp.content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+            
+        suggestions = json.loads(content.strip())
+        if not isinstance(suggestions, list) or len(suggestions) < 4:
+            raise ValueError("Invalid suggestion format")
+    except Exception as e:
+        print(f"Suggestion generation error: {e}")
+        suggestions = ["What is the main topic of this site?", "Can you summarize the content?", "Who is the intended audience?", "What are the key takeaways?"]
+
+    return len(chunks), pages_crawled, suggestions[:4]
 
 def chat_with_rag(user_message: str, training_id: str, llm):
     """

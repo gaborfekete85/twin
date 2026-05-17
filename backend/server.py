@@ -46,7 +46,7 @@ app.add_middleware(
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", ""))
 
-USE_S3 = os.getenv("USE_S3", "false").lower() == "true"
+USE_S3    = os.getenv("USE_S3", "false").lower() == "true"
 S3_BUCKET = os.getenv("S3_BUCKET", "")
 MEMORY_DIR = os.getenv("MEMORY_DIR", "../memory")
 
@@ -54,6 +54,9 @@ s3_client = boto3.client("s3") if USE_S3 else None
 
 # Thread pool for blocking I/O (Tavily, OpenAI embeddings) in async endpoints
 _executor = ThreadPoolExecutor(max_workers=4)
+
+# Detect Lambda runtime — SSE/streaming doesn't work through API Gateway
+IS_LAMBDA = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -131,74 +134,123 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "use_s3": USE_S3}
+    return {"status": "healthy", "use_s3": USE_S3, "is_lambda": IS_LAMBDA}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Route — train (SSE streaming)
+# Route — train
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _sse(payload: dict) -> str:
-    """Format a dict as an SSE data line."""
     return f"data: {json.dumps(payload)}\n\n"
+
+
+async def _run_train(request: TrainRequest) -> dict:
+    """Core training logic shared by both sync and SSE paths."""
+    loop = asyncio.get_running_loop()
+    training_id = str(uuid.uuid4())
+
+    pages = await loop.run_in_executor(
+        _executor, lambda: crawl_website(request.url, tavily_client))
+    if not pages:
+        raise ValueError("Could not crawl the URL. Check it and try again.")
+
+    all_chunks: list[dict] = []
+    for page in pages:
+        for text in chunk_text(page["content"]):
+            all_chunks.append({"text": text, "source_url": page["url"], "embedding": []})
+
+    if not all_chunks:
+        raise ValueError("No usable content found on the page.")
+
+    embeddings = await loop.run_in_executor(
+        _executor, lambda: embed_in_batches([c["text"] for c in all_chunks], openai_client))
+    for i, chunk in enumerate(all_chunks):
+        chunk["embedding"] = embeddings[i]
+
+    await loop.run_in_executor(
+        _executor, lambda: save_rag_index(
+            training_id, request.url, all_chunks, USE_S3, s3_client, S3_BUCKET))
+
+    return {
+        "status": "done",
+        "training_id": training_id,
+        "chunks_count": len(all_chunks),
+        "pages_count": len(pages),
+        "url": request.url,
+    }
 
 
 @app.post("/train")
 async def train(request: TrainRequest):
     """
-    Crawl a website with Tavily, chunk + embed its content, persist under a
-    new UUID training_id.  Streams SSE progress events back to the client.
+    Crawl a website, chunk + embed its content, persist under a UUID.
+    - Local dev : streams SSE progress events so the UI shows live steps.
+    - Lambda    : returns a single JSON response (API Gateway doesn't support SSE).
     """
+    if IS_LAMBDA:
+        # ── Synchronous JSON response for Lambda / API Gateway ────────────
+        try:
+            result = await _run_train(request)
+            return result
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    # ── SSE streaming for local dev ───────────────────────────────────────
     async def generate():
-        # Use get_running_loop() — correct API for Python 3.10+
         loop = asyncio.get_running_loop()
         training_id = str(uuid.uuid4())
-
         try:
-            from langchain_rag import crawl_and_index
-            import queue
-            q = queue.Queue()
-            
-            def sse_cb(payload):
-                q.put(payload)
-                
-            future = loop.run_in_executor(
-                _executor,
-                lambda: crawl_and_index(request.url, training_id, sse_cb)
-            )
-            
-            while not future.done():
-                while not q.empty():
-                    yield _sse(q.get())
+            yield _sse({"status": "crawling", "message": "Crawling website…"})
+            pages = await loop.run_in_executor(
+                _executor, lambda: crawl_website(request.url, tavily_client))
+            if not pages:
+                yield _sse({"status": "error", "message": "Could not crawl the URL. Check it and try again."})
+                return
+
+            yield _sse({"status": "chunking", "message": f"Processing {len(pages)} page(s)…"})
+            all_chunks: list[dict] = []
+            for page in pages:
+                for text in chunk_text(page["content"]):
+                    all_chunks.append({"text": text, "source_url": page["url"], "embedding": []})
+            if not all_chunks:
+                yield _sse({"status": "error", "message": "No usable content found on the page."})
+                return
+
+            yield _sse({"status": "embedding", "message": f"Generating embeddings for {len(all_chunks)} chunks…"})
+
+            embed_future = loop.run_in_executor(
+                _executor, lambda: embed_in_batches([c["text"] for c in all_chunks], openai_client))
+            while not embed_future.done():
                 yield ": heartbeat\n\n"
-                await asyncio.sleep(1)
-                
-            while not q.empty():
-                yield _sse(q.get())
-                
-            chunks_count, pages_count = future.result()
-            
+                await asyncio.sleep(2)
+
+            embeddings = await embed_future
+            for i, chunk in enumerate(all_chunks):
+                chunk["embedding"] = embeddings[i]
+
+            yield _sse({"status": "saving", "message": "Saving index…"})
+            await loop.run_in_executor(
+                _executor, lambda: save_rag_index(
+                    training_id, request.url, all_chunks, USE_S3, s3_client, S3_BUCKET))
+
             yield _sse({
                 "status": "done",
                 "training_id": training_id,
-                "chunks_count": chunks_count,
-                "pages_count": pages_count,
+                "chunks_count": len(all_chunks),
+                "pages_count": len(pages),
                 "url": request.url,
             })
 
         except Exception as exc:
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
             yield _sse({"status": "error", "message": str(exc)})
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -211,49 +263,35 @@ async def chat(request: ChatRequest):
         session_id = request.session_id or str(uuid.uuid4())
         conversation = load_conversation(session_id)
 
-        # Build system prompt — optionally inject RAG context
         system_content = prompt()
 
         if request.training_id:
             try:
-                from langchain_rag import chat_with_rag
-                from langchain_openai import ChatOpenAI
-                
-                llm = ChatOpenAI(
-                    model="gpt-4o-mini",
-                    temperature=0,
-                    max_tokens=5000,
-                    top_p=0.95,
-                    frequency_penalty=1.2,
-                    stop_sequences=['INST']
-                )
-                
-                assistant_response = chat_with_rag(request.message, request.training_id, llm)
+                rag_chunks = retrieve_context(
+                    request.message, request.training_id,
+                    openai_client, USE_S3, s3_client, S3_BUCKET, top_k=3)
+                if rag_chunks:
+                    system_content += (
+                        "\n\n## Retrieved Context from Trained Website\n"
+                        "Use the following passages to answer questions about the trained website.\n\n"
+                        + "\n\n---\n".join(rag_chunks)
+                    )
             except Exception as exc:
                 print(f"[chat] RAG retrieval error: {exc}")
-                assistant_response = f"Sorry, I encountered the following error: \n {exc}"
-        else:
-            messages = [{"role": "system", "content": system_content}]
-            for msg in conversation[-10:]:
-                messages.append({"role": msg["role"], "content": msg["content"]})
-            messages.append({"role": "user", "content": request.message})
 
-            response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-            )
-            assistant_response = response.choices[0].message.content
+        messages = [{"role": "system", "content": system_content}]
+        for msg in conversation[-10:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": request.message})
 
-        conversation.append({
-            "role": "user",
-            "content": request.message,
-            "timestamp": datetime.now().isoformat(),
-        })
-        conversation.append({
-            "role": "assistant",
-            "content": assistant_response,
-            "timestamp": datetime.now().isoformat(),
-        })
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini", messages=messages)
+        assistant_response = response.choices[0].message.content
+
+        conversation.append({"role": "user", "content": request.message,
+                              "timestamp": datetime.now().isoformat()})
+        conversation.append({"role": "assistant", "content": assistant_response,
+                              "timestamp": datetime.now().isoformat()})
         save_conversation(session_id, conversation)
 
         return ChatResponse(response=assistant_response, session_id=session_id)

@@ -14,11 +14,14 @@ interface Message {
   timestamp: Date;
 }
 
-interface TrainingInfo {
+interface TrainedSession {
   trainingId: string;
   url: string;
   chunksCount: number;
   pagesCount: number;
+  suggestions?: string[];
+  sessionId?: string;
+  messages: Message[];
 }
 
 type TrainingStatus = 'idle' | 'running' | 'done' | 'error';
@@ -33,21 +36,44 @@ const SUGGESTIONS = [
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export default function Twin() {
-  const [messages, setMessages]           = useState<Message[]>([]);
-  const [input, setInput]                 = useState('');
-  const [isLoading, setIsLoading]         = useState(false);
-  const [sessionId, setSessionId]         = useState('');
-  const [sidebarOpen, setSidebarOpen]     = useState(true);
+  const [trainedSessions, setTrainedSessions] = useState<TrainedSession[]>([]);
+  const [activeTrainingId, setActiveTrainingId] = useState<string | null>(null);
+
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Training state
-  const [trainUrl, setTrainUrl]           = useState('');
+  const [trainUrl, setTrainUrl] = useState('https://feketegabor.com');
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus>('idle');
   const [trainingProgress, setTrainingProgress] = useState('');
-  const [trainingInfo, setTrainingInfo]   = useState<TrainingInfo | null>(null);
   const [trainingError, setTrainingError] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef    = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Load from local storage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('trainedSessions');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        parsed.forEach((s: any) => {
+          s.messages.forEach((m: any) => m.timestamp = new Date(m.timestamp));
+        });
+        setTrainedSessions(parsed);
+      }
+    } catch { }
+  }, []);
+
+  // Save to local storage
+  useEffect(() => {
+    localStorage.setItem('trainedSessions', JSON.stringify(trainedSessions));
+  }, [trainedSessions]);
+
+  const activeSession = trainedSessions.find(s => s.trainingId === activeTrainingId);
+  const messages = activeSession ? activeSession.messages : [];
+  const trainingInfo = activeSession || null;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -64,43 +90,63 @@ export default function Twin() {
 
   const sendMessage = async (text?: string) => {
     const content = (text ?? input).trim();
-    if (!content || isLoading) return;
+    if (!content || isLoading || !activeTrainingId) return;
 
-    setMessages(prev => [...prev, {
+    const newMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
       content,
       timestamp: new Date(),
-    }]);
+    };
+
+    setTrainedSessions(prev => prev.map(s => s.trainingId === activeTrainingId ? { ...s, messages: [...s.messages, newMessage] } : s));
     setInput('');
     setIsLoading(true);
 
     try {
+      const currentSessionId = trainedSessions.find(s => s.trainingId === activeTrainingId)?.sessionId;
       const res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: content,
-          session_id: sessionId || undefined,
-          training_id: trainingInfo?.trainingId || undefined,
+          session_id: currentSessionId || undefined,
+          training_id: activeTrainingId,
         }),
       });
       if (!res.ok) throw new Error('Request failed');
       const data = await res.json();
-      if (!sessionId) setSessionId(data.session_id);
-      setMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: data.response,
-        timestamp: new Date(),
-      }]);
+
+      setTrainedSessions(prev => prev.map(s => {
+        if (s.trainingId === activeTrainingId) {
+          return {
+            ...s,
+            sessionId: data.session_id,
+            messages: [...s.messages, {
+              id: (Date.now() + 1).toString(),
+              role: 'assistant',
+              content: data.response,
+              timestamp: new Date(),
+            }]
+          };
+        }
+        return s;
+      }));
     } catch {
-      setMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: 'Sorry, I encountered an error. Please try again.',
-        timestamp: new Date(),
-      }]);
+      setTrainedSessions(prev => prev.map(s => {
+        if (s.trainingId === activeTrainingId) {
+          return {
+            ...s,
+            messages: [...s.messages, {
+              id: (Date.now() + 1).toString(),
+              role: 'assistant',
+              content: 'Sorry, I encountered an error. Please try again.',
+              timestamp: new Date(),
+            }]
+          };
+        }
+        return s;
+      }));
     } finally {
       setIsLoading(false);
     }
@@ -113,7 +159,16 @@ export default function Twin() {
     }
   };
 
-  const startNewChat = () => { setMessages([]); setSessionId(''); setInput(''); };
+  const startNewChat = () => {
+    setActiveTrainingId(null);
+    setTrainingStatus('idle');
+    setTrainUrl('https://feketegabor.com');
+  };
+
+  const switchSession = (id: string) => {
+    setActiveTrainingId(id);
+    setTrainingStatus('done');
+  };
 
   // ── Training ─────────────────────────────────────────────────────────────────
 
@@ -124,7 +179,6 @@ export default function Twin() {
     setTrainingStatus('running');
     setTrainingProgress('Connecting…');
     setTrainingError('');
-    setTrainingInfo(null);
 
     try {
       const res = await fetch(`${API_URL}/train`, {
@@ -132,36 +186,58 @@ export default function Twin() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       });
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let   buffer  = '';
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+      const handleDone = (data: { training_id: string; url: string; chunks_count: number; pages_count: number; suggestions?: string[] }) => {
+        const newSession: TrainedSession = {
+          trainingId: data.training_id,
+          url: data.url,
+          chunksCount: data.chunks_count,
+          pagesCount: data.pages_count,
+          suggestions: data.suggestions,
+          messages: [],
+        };
+        setTrainedSessions(prev => [newSession, ...prev]);
+        setActiveTrainingId(data.training_id);
+        setTrainingStatus('done');
+        setTrainingProgress('');
+      };
 
-        for (const line of lines) {
-          if (line.startsWith(':')) continue;  // SSE heartbeat comment
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.status === 'done') {
-              setTrainingInfo({ trainingId: data.training_id, url: data.url, chunksCount: data.chunks_count, pagesCount: data.pages_count });
-              setTrainingStatus('done');
-              setTrainingProgress('');
-            } else if (data.status === 'error') {
-              setTrainingError(data.message);
-              setTrainingStatus('error');
-            } else {
-              setTrainingProgress(data.message);
-            }
-          } catch { /* skip malformed */ }
+      const contentType = res.headers.get('content-type') || '';
+
+      if (contentType.includes('text/event-stream')) {
+        // ── SSE mode (local dev) ──────────────────────────────────────────
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            if (line.startsWith(':')) continue; // heartbeat
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.status === 'done') handleDone(data);
+              else if (data.status === 'error') { setTrainingError(data.message); setTrainingStatus('error'); }
+              else setTrainingProgress(data.message);
+            } catch { /* skip malformed */ }
+          }
         }
+      } else {
+        // ── JSON mode (Lambda / production) ──────────────────────────────
+        setTrainingProgress('Indexing website… (this may take up to 30s)');
+        const data = await res.json();
+        handleDone(data);
       }
     } catch (err: unknown) {
       setTrainingError(err instanceof Error ? err.message : 'Unknown error');
@@ -170,9 +246,9 @@ export default function Twin() {
   };
 
   const clearTraining = () => {
-    setTrainingInfo(null);
+    setActiveTrainingId(null);
     setTrainingStatus('idle');
-    setTrainUrl('');
+    setTrainUrl('https://feketegabor.com');
     setTrainingProgress('');
     setTrainingError('');
   };
@@ -205,26 +281,26 @@ export default function Twin() {
           </button>
         </div>
 
-        {/* Recent */}
+        {/* Trained Websites */}
         <div className="flex-1 px-3 pt-5 overflow-y-auto">
-          <p className="text-[10px] uppercase tracking-widest text-slate-600 px-1 mb-2">Recent</p>
-          {hasMessages ? (
-            <button className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-400 hover:bg-[#1a1a30] hover:text-white transition-colors text-left truncate">
-              <MessageSquare className="w-3.5 h-3.5 shrink-0 text-violet-500" />
-              <span className="truncate">{messages.find(m => m.role === 'user')?.content ?? 'Current chat'}</span>
-            </button>
+          <p className="text-[10px] uppercase tracking-widest text-slate-600 px-1 mb-2">Trained Websites</p>
+          {trainedSessions.length === 0 ? (
+            <p className="text-xs text-slate-600 px-1">No trained websites yet</p>
           ) : (
-            <p className="text-xs text-slate-600 px-1">No recent chats</p>
-          )}
-
-          {/* Training badge in sidebar when active */}
-          {trainingInfo && (
-            <div className="mt-4">
-              <p className="text-[10px] uppercase tracking-widest text-slate-600 px-1 mb-2">Trained on</p>
-              <div className="px-3 py-2 rounded-lg bg-violet-600/10 border border-violet-600/25 flex items-center gap-2">
-                <BookOpen className="w-3.5 h-3.5 text-violet-400 shrink-0" />
-                <span className="text-xs text-violet-300 truncate">{trainingInfo.url.replace(/^https?:\/\//, '')}</span>
-              </div>
+            <div className="space-y-1">
+              {trainedSessions.map(session => (
+                <button
+                  key={session.trainingId}
+                  onClick={() => switchSession(session.trainingId)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left truncate transition-colors ${activeTrainingId === session.trainingId
+                    ? 'bg-violet-600/20 text-violet-300 border border-violet-600/30'
+                    : 'text-slate-400 hover:bg-[#1a1a30] hover:text-white border border-transparent'
+                    }`}
+                >
+                  <BookOpen className={`w-3.5 h-3.5 shrink-0 ${activeTrainingId === session.trainingId ? 'text-violet-400' : 'text-slate-500'}`} />
+                  <span className="truncate">{session.url.replace(/^https?:\/\//, '')}</span>
+                </button>
+              ))}
             </div>
           )}
         </div>
@@ -277,7 +353,7 @@ export default function Twin() {
 
             {/* ── Landing (empty state) ── */}
             {!hasMessages && (
-              <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-8">
+              <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
 
                 {/* Hero */}
                 <div className="space-y-3">
@@ -294,22 +370,24 @@ export default function Twin() {
 
                 {/* ── Train on Website card ── */}
                 <div className="w-full max-w-lg">
-                  <div className={`rounded-2xl border p-5 transition-all ${
-                    trainingStatus === 'done'
-                      ? 'bg-[#0e1a0e] border-emerald-700/40'
-                      : 'bg-[#13132a] border-[#2a2a4a]'
-                  }`}>
+                  <div className={`rounded-2xl border p-5 transition-all ${trainingStatus === 'done'
+                    ? 'bg-[#0e1a0e] border-emerald-700/40'
+                    : 'bg-[#13132a] border-[#2a2a4a]'
+                    }`}>
 
                     {/* Card header */}
                     <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-600/30 to-indigo-600/30 border border-violet-600/30 flex items-center justify-center">
-                          <Globe className="w-3.5 h-3.5 text-violet-400" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-white">Train on Website</p>
-                          <p className="text-[10px] text-slate-500">Index any URL to chat with its content</p>
-                        </div>
+
+                      {/* <div className="flex items-center gap-2"> */}
+                      {/* <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-600/30 to-indigo-600/30 border border-violet-600/30 flex items-center justify-center">
+                        <Globe className="w-3.5 h-3.5 text-violet-400" />
+                      </div> */}
+                      {/* <Globe className="w-3.5 h-3.5 text-violet-400" /> */}
+                      <div>
+                        <p><strong>Train on website</strong></p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-slate-500">Index any URL to chat with its content</p>
                       </div>
                       {trainingStatus === 'done' && (
                         <button onClick={clearTraining} className="text-slate-600 hover:text-slate-400 transition-colors" title="Clear">
@@ -395,14 +473,16 @@ export default function Twin() {
                 </div>
 
                 {/* Suggestion chips */}
-                <div className="grid grid-cols-2 gap-2 w-full max-w-md">
-                  {SUGGESTIONS.map(s => (
-                    <button key={s} onClick={() => sendMessage(s)}
-                      className="px-4 py-3 rounded-xl bg-[#13132a] border border-[#2a2a4a] text-sm text-slate-300 hover:border-violet-600/60 hover:text-white hover:bg-[#1a1a35] transition-all text-left">
-                      {s}
-                    </button>
-                  ))}
-                </div>
+                {trainingStatus === 'done' && trainingInfo?.suggestions && (
+                  <div className="grid grid-cols-2 gap-2 w-full max-w-md mt-6">
+                    {trainingInfo.suggestions.map(s => (
+                      <button key={s} onClick={() => sendMessage(s)}
+                        className="px-4 py-3 rounded-xl bg-[#13132a] border border-[#2a2a4a] text-sm text-slate-300 hover:border-violet-600/60 hover:text-white hover:bg-[#1a1a35] transition-all text-left">
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -414,11 +494,10 @@ export default function Twin() {
                     <Bot className="w-4 h-4 text-white" />
                   </div>
                 )}
-                <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                  message.role === 'user'
-                    ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-tr-sm shadow-lg shadow-violet-900/30'
-                    : 'bg-[#13132a] border border-[#2a2a4a] text-slate-200 rounded-tl-sm'
-                }`}>
+                <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${message.role === 'user'
+                  ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-tr-sm shadow-lg shadow-violet-900/30'
+                  : 'bg-[#13132a] border border-[#2a2a4a] text-slate-200 rounded-tl-sm'
+                  }`}>
                   <p className="whitespace-pre-wrap">{message.content}</p>
                   <p className={`text-[10px] mt-1.5 ${message.role === 'user' ? 'text-violet-200/70' : 'text-slate-600'}`}>
                     {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -462,8 +541,8 @@ export default function Twin() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={trainingInfo ? `Ask about ${trainingInfo.url.replace(/^https?:\/\//, '')}…` : 'Message your Digital Twin…'}
-                disabled={isLoading}
+                placeholder={trainingInfo ? `Ask about ${trainingInfo.url.replace(/^https?:\/\//, '')}…` : 'Train a website to start chatting…'}
+                disabled={isLoading || !activeTrainingId}
                 className="flex-1 bg-transparent text-sm text-slate-200 placeholder-slate-600 resize-none outline-none leading-relaxed max-h-40"
               />
               <button

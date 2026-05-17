@@ -6,8 +6,15 @@ PROJECT_NAME=${2:-twin}
 
 echo "🚀 Deploying ${PROJECT_NAME} to ${ENVIRONMENT}..."
 
-# 1. Build Lambda package
+# Source environment variables if present
 cd "$(dirname "$0")/.."        # project root
+if [ -f "backend/.env" ]; then
+  set -a
+  source backend/.env
+  set +a
+fi
+
+# 1. Build Lambda package
 echo "📦 Building Lambda package..."
 (cd backend && uv run deploy.py)
 
@@ -15,7 +22,11 @@ echo "📦 Building Lambda package..."
 cd terraform
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 AWS_REGION=${DEFAULT_AWS_REGION:-us-east-1}
-terraform init -input=false \
+
+# Clean any corrupted local terraform caches
+rm -rf .terraform .terraform.lock.hcl
+
+terraform init -input=false -force-copy \
   -backend-config="bucket=twin-terraform-state-${AWS_ACCOUNT_ID}" \
   -backend-config="key=${ENVIRONMENT}/terraform.tfstate" \
   -backend-config="region=${AWS_REGION}" \
@@ -54,7 +65,15 @@ npm run build
 aws s3 sync ./out "s3://$FRONTEND_BUCKET/" --delete
 cd ..
 
-# 4. Final messages
+# 4. Invalidate CloudFront cache so changes are visible immediately
+CLOUDFRONT_ID=$(terraform -chdir=terraform output -raw cloudfront_distribution_id)
+echo "🔄 Invalidating CloudFront cache ($CLOUDFRONT_ID)..."
+aws cloudfront create-invalidation \
+  --distribution-id "$CLOUDFRONT_ID" \
+  --paths "/*" \
+  --output text
+
+# 5. Final messages
 echo -e "\n✅ Deployment complete!"
 echo "🌐 CloudFront URL : $(terraform -chdir=terraform output -raw cloudfront_url)"
 if [ -n "$CUSTOM_URL" ]; then
